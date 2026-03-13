@@ -149,6 +149,24 @@ TOOLS = [
         },
     },
     {
+        "name": "task_create",
+        "description": "Create a new task in the project. Use this when you want to start work but no task exists yet.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Short descriptive task title"},
+                "description": {"type": "string", "description": "What needs to be done and why"},
+                "priority": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high"],
+                    "default": "medium",
+                    "description": "Task priority",
+                },
+            },
+            "required": ["title"],
+        },
+    },
+    {
         "name": "task_claim",
         "description": "Claim a pending task for this agent.",
         "inputSchema": {
@@ -304,6 +322,43 @@ async def _handle_task_list(params: dict, project: Project, session: Session) ->
         }
         for t in tasks
     ]
+
+
+async def _handle_task_create(
+    params: dict,
+    slug: str,
+    project: Project,
+    agent_id: str,
+    session: Session,
+) -> Any:
+    from services.task_service import create_task
+
+    title = params.get("title", "").strip()
+    if not title:
+        return {"error": "title is required"}
+
+    description = params.get("description", "").strip() or None
+    priority = params.get("priority", "medium")
+    if priority not in ("low", "medium", "high"):
+        priority = "medium"
+
+    task = create_task(session, project.id, title, description)
+    # Store priority in description if no dedicated column; or just set it if model supports it
+    if hasattr(task, "priority"):
+        task.priority = priority
+        session.add(task)
+        session.commit()
+        session.refresh(task)
+
+    await broadcast_task(slug, task, event_type="task_new")
+    return {
+        "id": task.id,
+        "title": task.title,
+        "description": task.description,
+        "status": task.status,
+        "priority": priority,
+        "created_at": task.created_at.isoformat(),
+    }
 
 
 async def _handle_task_claim(
@@ -488,6 +543,8 @@ async def _dispatch(
         return await _handle_thread_read(params, project, session)
     elif method == "task_list":
         return await _handle_task_list(params, project, session)
+    elif method == "task_create":
+        return await _handle_task_create(params, slug, project, agent_id, session)
     elif method == "task_claim":
         return await _handle_task_claim(params, slug, project, agent_id, session)
     elif method == "task_update":
