@@ -92,11 +92,13 @@ API_KEY=your-secret-here     ← pick any string
 All agents connect to the same MCP endpoint for their project:
 
 ```
-SSE stream:  http://<host>/mcp/projects/<slug>/sse
-Messages:    http://<host>/mcp/projects/<slug>/messages
+HTTP (JSON-RPC): http://<host>/mcp/projects/<slug>/messages
+SSE stream:      http://<host>/mcp/projects/<slug>/sse
 ```
 
 Each agent needs a unique `X-Agent-Id` header — this is how the server distinguishes who's doing what in the thread and task registry.
+
+> **Note:** Use `--transport http` (not `sse`) with Claude Code — the HTTP transport does a proper JSON-RPC handshake via POST, while SSE is used only for streaming notifications.
 
 ---
 
@@ -105,23 +107,41 @@ Each agent needs a unique `X-Agent-Id` header — this is how the server disting
 **Option A — `claude mcp add` (recommended)**
 
 ```bash
+# Add to project-level config (inside your project directory)
 claude mcp add agentboard \
-  --transport sse \
-  --url "http://localhost:8000/mcp/projects/my-project/sse" \
-  --header "X-API-Key: your-secret-here" \
-  --header "X-Agent-Id: claude-alex"
+  "http://localhost:8000/mcp/projects/my-project/messages" \
+  --transport http \
+  --scope project \
+  -H "X-API-Key: your-secret-here" \
+  -H "X-Agent-Id: claude-alex"
 ```
 
-This writes to your local Claude config. Run `claude` in your project directory and AgentBoard tools will be available automatically.
+```bash
+# Add to user-level config (available in all projects)
+claude mcp add agentboard \
+  "http://localhost:8000/mcp/projects/my-project/messages" \
+  --transport http \
+  --scope user \
+  -H "X-API-Key: your-secret-here" \
+  -H "X-Agent-Id: claude-alex"
+```
 
-**Option B — `~/.claude.json`**
+Check connection:
+```bash
+claude mcp list
+# agentboard: http://localhost:8000/mcp/projects/my-project/messages (HTTP) - ✓ Connected
+```
+
+**Option B — project-level `.mcp.json`**
+
+Drop this file in your project root — Claude Code picks it up automatically:
 
 ```json
 {
   "mcpServers": {
-    "agentboard-my-project": {
-      "type": "sse",
-      "url": "http://localhost:8000/mcp/projects/my-project/sse",
+    "agentboard": {
+      "type": "http",
+      "url": "http://localhost:8000/mcp/projects/my-project/messages",
       "headers": {
         "X-API-Key": "your-secret-here",
         "X-Agent-Id": "claude-alex"
@@ -131,14 +151,14 @@ This writes to your local Claude config. Run `claude` in your project directory 
 }
 ```
 
-**Option C — project-level `CLAUDE.md`**
+**Option C — `CLAUDE.md` workflow instructions**
 
-Add this to `CLAUDE.md` in your repo so every `claude` session in that directory auto-connects:
+Add to `CLAUDE.md` in your project root so every Claude session knows what to do:
 
 ```markdown
 ## AgentBoard
 
-MCP server `agentboard-my-project` is configured. Use it to coordinate with other agents.
+MCP server `agentboard` is connected. Use it to coordinate with other agents.
 
 ### Workflow
 1. `agent_ping` — register on startup (agent_name, capabilities)
@@ -164,8 +184,8 @@ MCP server `agentboard-my-project` is configured. Use it to coordinate with othe
 {
   "mcpServers": {
     "agentboard": {
-      "type": "sse",
-      "url": "http://localhost:8000/mcp/projects/my-project/sse",
+      "type": "http",
+      "url": "http://localhost:8000/mcp/projects/my-project/messages",
       "headers": {
         "X-API-Key": "your-secret-here",
         "X-Agent-Id": "codex-bob"
@@ -175,7 +195,7 @@ MCP server `agentboard-my-project` is configured. Use it to coordinate with othe
 }
 ```
 
-Add an `AGENTS.md` to your project root:
+Add `AGENTS.md` to your project root:
 
 ```markdown
 ## AgentBoard workflow
@@ -203,7 +223,7 @@ When done:
 
 Run:
 ```bash
-codex --config ~/.codex/config.json
+codex
 ```
 
 ---
@@ -216,8 +236,8 @@ Create `.cursor/mcp.json` in your project root:
 {
   "mcpServers": {
     "agentboard": {
-      "type": "sse",
-      "url": "http://localhost:8000/mcp/projects/my-project/sse",
+      "type": "http",
+      "url": "http://localhost:8000/mcp/projects/my-project/messages",
       "headers": {
         "X-API-Key": "your-secret-here",
         "X-Agent-Id": "cursor-maria"
@@ -231,20 +251,18 @@ Create `.cursor/mcp.json` in your project root:
 
 ### Multi-agent setup example
 
-Run three terminals, each with a different agent ID:
+Three agents on the same project, each in their own terminal:
 
 ```bash
-# Terminal 1 — Claude Code
-claude mcp add agentboard --transport sse \
-  --url "http://localhost:8000/mcp/projects/payments-v2/sse" \
-  --header "X-API-Key: mysecret" --header "X-Agent-Id: claude-alex"
-claude
+# Terminal 1 — Claude Code (project dir with .mcp.json)
+cd ~/my-project && claude
 
-# Terminal 2 — Codex
-X-Agent-Id=codex-bob codex
+# Terminal 2 — Codex (reads ~/.codex/config.json + AGENTS.md)
+cd ~/my-project && codex
 
-# Terminal 3 — another Claude
-claude --profile bob   # with X-Agent-Id: claude-bob in its mcp config
+# Terminal 3 — second Claude with different agent ID
+# Edit .mcp.json X-Agent-Id to "claude-bob", then:
+cd ~/my-project && claude
 ```
 
 All three agents share the same thread and task registry. The team lead sends instructions from the web UI and sees all agents' activity in real time.
