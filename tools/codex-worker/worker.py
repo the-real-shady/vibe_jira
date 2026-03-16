@@ -368,20 +368,20 @@ def run_personality_onboarding(ab: AgentBoard, work_dir: str,
     and block until a team-lead reply arrives, then write the file.
     Also creates a blank MEMORY file if absent.
     """
-    personality_path = os.path.join(work_dir, "PERSONALITY")
-    memory_path      = os.path.join(work_dir, "MEMORY")
+    personality_path = os.path.join(work_dir, "PERSONALITY.md")
+    memory_path      = os.path.join(work_dir, "MEMORY.md")
 
-    # Create blank MEMORY if missing
+    # Create blank MEMORY.md if missing
     if not os.path.exists(memory_path):
         with open(memory_path, "w", encoding="utf-8") as f:
             f.write(_MEMORY_TEMPLATE)
-        log.info("Created blank MEMORY file → %s", memory_path)
+        log.info("Created blank MEMORY.md file → %s", memory_path)
 
     if os.path.exists(personality_path):
-        log.info("PERSONALITY file found — skipping onboarding")
+        log.info("PERSONALITY.md file found — skipping onboarding")
         return
 
-    log.info("No PERSONALITY file — starting onboarding interview")
+    log.info("No PERSONALITY.md — starting onboarding interview")
     questions = _PERSONALITY_QUESTIONS.format(agent_id=ab.agent_id)
     result    = ab.post(questions, tag="question")
     q_msg_id  = result.get("id", "")
@@ -394,35 +394,40 @@ def run_personality_onboarding(ab: AgentBoard, work_dir: str,
         if msgs:
             since_ts = max(m.get("created_at", "") for m in msgs) or since_ts
 
-        # Accept any reply to the questions message from a non-self agent
+        # Accept a direct reply OR any team-lead message that arrived after the question
         for msg in msgs:
-            if (msg.get("reply_to") == q_msg_id
-                    and msg.get("agent_id") != ab.agent_id):
-                answer  = msg.get("content", "")
-                answers = _parse_personality(answer)
+            if msg.get("agent_id") == ab.agent_id:
+                continue
+            is_reply     = msg.get("reply_to") == q_msg_id
+            is_teamlead  = msg.get("agent_id") == "team-lead"
+            if not (is_reply or is_teamlead):
+                continue
 
-                with open(personality_path, "w", encoding="utf-8") as f:
-                    f.write(_PERSONALITY_TEMPLATE.format(**answers))
-                log.info("PERSONALITY written → %s", personality_path)
+            answer  = msg.get("content", "")
+            answers = _parse_personality(answer)
 
-                ab.post(
-                    f"Got it! Personality saved. Here's how I understand myself:\n\n"
-                    f"- **Role:** {answers['role']}\n"
-                    f"- **Style:** {answers['style']}\n"
-                    f"- **Strengths:** {answers['strengths']}\n"
-                    f"- **Limits:** {answers['limits']}\n"
-                    f"- **Quirks:** {answers['quirks']}\n\n"
-                    f"Starting work now.",
-                    tag="update",
-                    reply_to=msg.get("id"),
-                )
-                return
+            with open(personality_path, "w", encoding="utf-8") as f:
+                f.write(_PERSONALITY_TEMPLATE.format(**answers))
+            log.info("PERSONALITY.md written → %s", personality_path)
+
+            ab.post(
+                f"Got it! Personality saved. Here's how I understand myself:\n\n"
+                f"- **Role:** {answers['role']}\n"
+                f"- **Style:** {answers['style']}\n"
+                f"- **Strengths:** {answers['strengths']}\n"
+                f"- **Limits:** {answers['limits']}\n"
+                f"- **Quirks:** {answers['quirks']}\n\n"
+                f"Starting work now.",
+                tag="update",
+                reply_to=msg.get("id"),
+            )
+            return
 
         log.debug("Onboarding: still waiting for reply to %s…", q_msg_id[:8])
 
 
 def read_personality(work_dir: str) -> str:
-    path = os.path.join(work_dir, "PERSONALITY")
+    path = os.path.join(work_dir, "PERSONALITY.md")
     if not os.path.exists(path):
         return ""
     with open(path, encoding="utf-8") as f:
@@ -430,7 +435,7 @@ def read_personality(work_dir: str) -> str:
 
 
 def read_memory(work_dir: str) -> str:
-    path = os.path.join(work_dir, "MEMORY")
+    path = os.path.join(work_dir, "MEMORY.md")
     if not os.path.exists(path):
         return ""
     with open(path, encoding="utf-8") as f:
@@ -486,7 +491,7 @@ def build_task_prompt(task: dict, instructions: list[dict],
         {pers_block}{memory_block}{instr_block}{sys_block}{feed_block}{workflow}
 
         Work on this task. Update status via AgentBoard MCP tools when done.
-        To update your memory, edit the `MEMORY` file in the work directory.
+        To update your memory, edit the `MEMORY.md` file in the work directory.
     """).strip()
 
 
@@ -517,7 +522,7 @@ def build_system_prompt(msg: dict, thread_feed: list[dict],
 
         Respond in the thread when done. Be concise.
         Do NOT start unrelated coding work — only act on this instruction.
-        To update your memory, edit the `MEMORY` file in the work directory.
+        To update your memory, edit the `MEMORY.md` file in the work directory.
     """).strip()
 
 
@@ -552,7 +557,7 @@ def build_mention_prompt(msg: dict, instructions: list[dict],
 
         Answer the question or address the request above. Be concise.
         Do NOT start any new coding work — only respond to this message.
-        To update your memory, edit the `MEMORY` file in the work directory.
+        To update your memory, edit the `MEMORY.md` file in the work directory.
     """).strip()
 
 
