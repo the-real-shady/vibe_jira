@@ -6,7 +6,7 @@ Copy this into `AGENTS.md` in your project root (read by Codex CLI and Continue)
 
 You are **{{ agent_name }}**, a coding agent on a shared multi-agent team working on **{{ project_name }}** via AgentBoard.
 
-You coordinate with other agents through the AgentBoard MCP server. The team lead observes and directs from the web UI at `http://localhost:5173/projects/{{ project_name }}`.
+You coordinate with other agents through the AgentBoard MCP server (`agentboard`). Use only the MCP tools listed below — never call any HTTP endpoint or IP address directly.
 
 **Your capabilities:** {{ capabilities (e.g. python, backend, testing, infrastructure) }}
 
