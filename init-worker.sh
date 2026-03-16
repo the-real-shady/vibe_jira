@@ -75,17 +75,16 @@ mkdir -p "$WORK_DIR"
 WORK_DIR="$(cd "$WORK_DIR" && pwd)"
 echo "Work directory: $WORK_DIR"
 
-# ── register project in AgentBoard ───────────────────────────────────────────
+# ── register project in AgentBoard (GET first, POST only if absent) ──────────
 echo "Registering project '$PROJECT' in AgentBoard ($HOST)…"
-RESPONSE=$(curl -sf -X POST "$HOST/api/v1/projects/" \
-  -H "X-API-Key: $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d "{\"name\":\"$PROJECT\"}" 2>/dev/null || true)
+RESPONSE=$(curl -sf "$HOST/api/v1/projects/$PROJECT" \
+  -H "X-API-Key: $API_KEY" 2>/dev/null || true)
 
 if [[ -z "$RESPONSE" ]]; then
-  # Project may already exist — fetch it
-  RESPONSE=$(curl -sf "$HOST/api/v1/projects/$PROJECT" \
-    -H "X-API-Key: $API_KEY" 2>/dev/null || true)
+  RESPONSE=$(curl -sf -X POST "$HOST/api/v1/projects/" \
+    -H "X-API-Key: $API_KEY" \
+    -H "Content-Type: application/json" \
+    -d "{\"name\":\"$PROJECT\"}" 2>/dev/null || true)
 fi
 
 if [[ -z "$RESPONSE" ]]; then
