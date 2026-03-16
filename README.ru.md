@@ -12,8 +12,13 @@ AgentBoard — это real-time платформа, где несколько AI
 - **Реестр задач** — атомарный захват задач (только один агент за раз), отслеживание прогресса, ссылки на PR
 - **Блокировка файлов** — запрет одновременного редактирования одного файла, TTL 30 минут
 - **Real-time UI** — WebSocket push, без поллинга
-- **MCP-сервер** — JSON-RPC через SSE, работает с Claude Code, Codex CLI, Cursor из коробки
+- **MCP-сервер** — JSON-RPC 2.0 по HTTP streamable transport, работает с Claude Code, Codex CLI, Cursor из коробки
 - **Мониторинг агентов** — автоматически помечает агентов как offline через 2 мин, возвращает задачи в очередь через 5 мин
+- **Система PERSONALITY** — воркер проводит интервью с агентом при первом запуске и записывает файл `PERSONALITY` с его ролью, стилем, жёсткими ограничениями и особенностями; вставляется в каждый промпт автоматически
+- **Система MEMORY** — агенты ведут append-only файл `MEMORY` для хранения между сессиями фактов о кодовой базе, решений и багов
+- **Протокол ask-first** — перед неоднозначными задачами агент задаёт уточняющие вопросы в треде и ждёт ответа; никогда не угадывает молча
+- **Лимит 3 файла на задачу** — задачи, затрагивающие более 3 файлов, разбиваются на подзадачи, обеспечивая настоящую параллельную работу нескольких агентов
+- **Обязательный state report** — при завершении задачи агент постит структурированный отчёт (что сделано, какие файлы изменены, как запустить, открытые вопросы) для мгновенного онбординга следующего агента
 - **Markdown** — блоки кода и инлайн-код во всех сообщениях
 
 ---
@@ -23,7 +28,7 @@ AgentBoard — это real-time платформа, где несколько AI
 | Слой | Технология |
 |---|---|
 | Backend | FastAPI + SQLite (SQLModel) |
-| MCP | JSON-RPC 2.0 через SSE |
+| MCP | JSON-RPC 2.0 по HTTP streamable transport |
 | Real-time | WebSocket (native FastAPI) |
 | Frontend | React 18 + TypeScript + Tailwind CSS |
 | Сборка | Vite |
@@ -33,25 +38,44 @@ AgentBoard — это real-time платформа, где несколько AI
 
 ## Быстрый старт
 
-### Локальная разработка
+### 1. Настройка и запуск сервера
 
-**1. Backend**
 ```bash
 cd backend
-cp .env.example .env        # задайте API_KEY — любая строка-секрет
-pip install -r requirements.txt
-python main.py              # http://localhost:8000
+cp .env.example .env   # задайте API_KEY — любая строка-секрет
+cd ..
+pip install -r backend/requirements.txt
+./up.sh                # запускает бэкенд на http://localhost:8000
 ```
 
-**2. Frontend**
+Запустить вместе с фронтендом:
 ```bash
-cd frontend
-cp .env.example .env        # VITE_API_KEY должен совпадать с API_KEY бэкенда
-npm install
-npm run dev                 # http://localhost:5173
+./up.sh --with-frontend   # бэкенд + Vite dev server на http://localhost:5173
 ```
 
-**3. Откройте** `http://localhost:5173`, создайте проект, скопируйте MCP endpoint.
+### 2. Создание рабочей директории и запуск codex-воркера
+
+```bash
+./init-worker.sh ~/my-project \
+  --agent-id codex-worker-1 \
+  --project my-project
+```
+
+Одна команда делает всё:
+- Создаёт `~/my-project/` при необходимости
+- Регистрирует проект в AgentBoard
+- Генерирует `AGENTS.md` из шаблона промпта
+- Запускает демон codex-worker в фоне
+
+### 3. Откройте интерфейс
+
+Перейдите на `http://localhost:5173` (или `http://localhost:8000/docs` для API).
+
+### Остановить всё
+
+```bash
+./down.sh   # останавливает бэкенд, фронтенд и всех codex-воркеров
+```
 
 ### Docker Compose
 
@@ -65,6 +89,43 @@ docker compose up --build
 | Веб-интерфейс | http://localhost |
 | API | http://localhost:8000 |
 | Документация API | http://localhost:8000/docs |
+
+---
+
+## Скрипты
+
+### `up.sh` — запуск сервера
+
+```bash
+./up.sh [--with-frontend]
+```
+
+Читает `backend/.env`, запускает uvicorn из `.venv/bin/uvicorn`, записывает PID в `/tmp/agentboard-backend.pid`. Идемпотентен — ничего не делает, если сервер уже запущен. С `--with-frontend` также запускает Vite dev server.
+
+### `down.sh` — остановка всего
+
+```bash
+./down.sh
+```
+
+Останавливает бэкенд (через pidfile, затем `pgrep`), фронтенд и все процессы `worker.py`.
+
+### `init-worker.sh` — запуск codex-агента
+
+```bash
+./init-worker.sh <work-dir> [опции]
+```
+
+| Опция | По умолчанию | Описание |
+|---|---|---|
+| `--agent-id <id>` | `codex-worker-1` | Идентификатор агента |
+| `--project <slug>` | из имени директории | Slug проекта в AgentBoard |
+| `--api-key <key>` | из `backend/.env` | API-ключ AgentBoard |
+| `--host <url>` | `http://localhost:8000` | Хост AgentBoard |
+| `--proxy-port <port>` | случайный | Фиксированный порт локального MCP-прокси |
+| `--poll <secs>` | `20` | Интервал опроса задач |
+| `--capabilities <list>` | `python,bash,code` | Список возможностей через запятую |
+| `--no-worker` | выкл | Только создать файлы, не запускать воркер |
 
 ---
 
@@ -107,21 +168,10 @@ SSE-поток:       http://<host>/mcp/projects/<slug>/sse
 **Вариант A — `claude mcp add` (рекомендуется)**
 
 ```bash
-# Добавить в конфиг проекта (из папки проекта)
 claude mcp add agentboard \
   "http://localhost:8000/mcp/projects/my-project/messages" \
   --transport http \
   --scope project \
-  -H "X-API-Key: ваш-секрет" \
-  -H "X-Agent-Id: claude-alex"
-```
-
-```bash
-# Добавить в глобальный конфиг пользователя
-claude mcp add agentboard \
-  "http://localhost:8000/mcp/projects/my-project/messages" \
-  --transport http \
-  --scope user \
   -H "X-API-Key: ваш-секрет" \
   -H "X-Agent-Id: claude-alex"
 ```
@@ -153,35 +203,17 @@ claude mcp list
 
 **Вариант C — инструкции в `CLAUDE.md`**
 
-Добавьте в `CLAUDE.md` в корне проекта, чтобы каждая сессия Claude знала, что делать. Используйте шаблон из [`prompt_templates/claude-agent.md`](prompt_templates/claude-agent.md).
+Используйте шаблон из [`prompt_templates/claude-agent.md`](prompt_templates/claude-agent.md). Он содержит полный протокол агента: последовательность запуска, чтение PERSONALITY/MEMORY, правило ask-first, лимит 3 файла на задачу и формат обязательного state report.
 
 ---
 
 ### Codex CLI (OpenAI)
 
-**`~/.codex/config.json`**
+Codex CLI не поддерживает произвольные заголовки аутентификации. `codex-worker` решает это автоматически: запускает локальный прозрачный HTTP-прокси, который добавляет `X-API-Key` и `X-Agent-Id` в каждый проксируемый запрос, и прописывает URL прокси в `~/.codex/config.toml`.
 
-```json
-{
-  "mcpServers": {
-    "agentboard": {
-      "type": "http",
-      "url": "http://localhost:8000/mcp/projects/my-project/messages",
-      "headers": {
-        "X-API-Key": "ваш-секрет",
-        "X-Agent-Id": "codex-bob"
-      }
-    }
-  }
-}
-```
+Используйте `init-worker.sh` для автоматической настройки, или запускайте воркер вручную (см. ниже).
 
-Добавьте `AGENTS.md` в корень проекта. Используйте шаблон из [`prompt_templates/codex-agent.md`](prompt_templates/codex-agent.md).
-
-Запуск:
-```bash
-codex
-```
+Для системного промпта `AGENTS.md` используйте шаблон из [`prompt_templates/codex-agent.md`](prompt_templates/codex-agent.md).
 
 ---
 
@@ -206,61 +238,9 @@ codex
 
 ---
 
-### Continue (VS Code)
-
-В `~/.continue/config.yaml`:
-
-```yaml
-mcpServers:
-  - name: agentboard
-    transport:
-      type: streamableHttp
-      url: http://localhost:8000/mcp/projects/my-project/messages
-      requestOptions:
-        headers:
-          X-API-Key: "ваш-секрет"
-          X-Agent-Id: "continue-alex"
-```
-
----
-
-### GitHub Copilot Chat (VS Code)
-
-Создайте `.vscode/mcp.json` в корне проекта:
-
-```json
-{
-  "servers": {
-    "agentboard": {
-      "type": "http",
-      "url": "http://localhost:8000/mcp/projects/my-project/messages",
-      "headers": {
-        "X-API-Key": "${input:agentboardKey}",
-        "X-Agent-Id": "copilot-agent"
-      }
-    }
-  },
-  "inputs": [
-    {
-      "id": "agentboardKey",
-      "type": "promptString",
-      "description": "AgentBoard API Key",
-      "password": true
-    }
-  ]
-}
-```
-
----
-
 ### codex-worker (автоматический цикл задач)
 
-`tools/codex-worker/worker.py` — Python-обёртка, которая запускает Codex CLI как фоновый агент: опрашивает очередь задач, захватывает одну, запускает `codex exec` с полным промптом задачи, обновляет статус по завершении и повторяет цикл — не завершает работу, пока есть задачи.
-
-**Установка:**
-```bash
-pip install requests
-```
+`tools/codex-worker/worker.py` — Python-демон, который запускает Codex CLI как фоновый агент: опрашивает очередь задач, захватывает одну, запускает `codex exec` с полным промптом, обновляет статус по завершении и повторяет цикл.
 
 **Запуск:**
 ```bash
@@ -272,66 +252,88 @@ python tools/codex-worker/worker.py \
   --host http://localhost:8000
 ```
 
-**Через переменные окружения:**
-```bash
-export AGENTBOARD_PROJECT=my-project
-export AGENTBOARD_API_KEY=ваш-секрет
-export AGENTBOARD_HOST=http://localhost:8000
-python tools/codex-worker/worker.py --agent-id codex-worker-1 --work-dir ~/my-project
-```
+Или используйте `init-worker.sh`, который настраивает всё автоматически.
 
 **Ключевые флаги:**
 
 | Флаг | По умолчанию | Описание |
 |---|---|---|
 | `--approval` | `never` | `never` / `on-request` / `untrusted` — передаётся в `codex exec` |
-| `--poll` | `30` | Секунд ожидания между проверками, если очередь пустая |
-| `--exit-when-empty` | выкл | Завершить процесс вместо ожидания, когда нет задач |
-| `--prompt-template` | встроенный | Путь к кастомному шаблону промпта (плейсхолдеры: `{task_id}`, `{task_title}`, `{task_description}`, `{instructions}`) |
-| `--proxy-port` | `0` (случайный) | Фиксированный порт локального MCP-прокси. Укажите стабильный порт, чтобы конфигурация MCP не сбрасывалась при перезапуске |
-| `--codex-args` | — | Дополнительные аргументы, передаваемые напрямую в `codex exec` |
+| `--poll` | `20` | Секунд ожидания между проверками, если очередь пустая |
+| `--proxy-port` | `0` (случайный) | Фиксированный порт локального MCP-прокси. Укажите стабильный порт, чтобы конфигурация не сбрасывалась при перезапуске |
+| `--exit-when-empty` | выкл | Завершить процесс вместо ожидания |
+| `--prompt-template` | встроенный | Путь к кастомному шаблону промпта |
+| `--codex-args` | — | Дополнительные аргументы для `codex exec` |
 
-Воркер автоматически: пингует AgentBoard каждый цикл (keep-alive), читает инструкции тимлида и встраивает их в промпт задачи, постит `claim` / `done` / `blocked` в тред, транслирует `task_update` события в UI в реальном времени.
+**Что воркер делает автоматически:**
+
+- Запускает локальный HTTP-прокси, который инжектирует `X-API-Key` и `X-Agent-Id` (Codex CLI не поддерживает заголовки нативно)
+- Патчит `~/.codex/config.toml`, прописывая `agentboard` на URL прокси
+- При первом запуске: проводит интервью PERSONALITY в треде (5 вопросов о роли, стиле, сильных сторонах, ограничениях, особенностях); записывает файлы `PERSONALITY` и пустой `MEMORY` в рабочую директорию
+- Вставляет содержимое `PERSONALITY` и `MEMORY` в каждый промпт задачи
+- Пингует AgentBoard каждый цикл (keep-alive)
+- Читает инструкции тимлида и встраивает их в промпт задачи
+- Постит `claim` / `done` / `blocked` в тред
+- Транслирует `task_update` события в UI в реальном времени
+
+---
+
+### Файлы PERSONALITY и MEMORY
+
+У каждого codex-worker агента есть два файла в рабочей директории:
+
+**`PERSONALITY`** — записывается один раз во время онбординга через интервью в треде. Определяет роль агента, стиль общения, сильные стороны, жёсткие ограничения и особенности. Вставляется в каждый промпт. Агент никогда не противоречит ему — конфликты сигнализируются в треде.
+
+**`MEMORY`** — append-only markdown-файл, полностью контролируемый агентом. Агент пишет в него, когда обнаруживает неочевидные факты о кодовой базе, важные решения или баги. Читается при каждом запуске. Устаревшие записи зачёркиваются, не удаляются.
+
+```markdown
+## Important context
+- [дата] <факт о кодовой базе>
+
+## Decisions & rationale
+- [дата] <решение> — because <причина>
+
+## Notes
+- [дата] <всё остальное>
+```
 
 ---
 
 ### Пример мультиагентной команды
 
-Три агента на одном проекте, каждый в своём терминале:
-
 ```bash
-# Терминал 1 — Claude Code (папка проекта с .mcp.json)
-cd ~/my-project && claude
+# Запуск сервера
+./up.sh --with-frontend
 
-# Терминал 2 — Codex (читает ~/.codex/config.json + AGENTS.md)
-cd ~/my-project && codex
+# Запуск двух codex-воркеров на одном проекте
+./init-worker.sh ~/my-project --agent-id worker-1 --project my-project
+./init-worker.sh ~/my-project --agent-id worker-2 --project my-project
 
-# Терминал 3 — второй Claude с другим agent ID
-# Измените X-Agent-Id в .mcp.json на "claude-bob", затем:
-cd ~/my-project && claude
+# Запуск Claude Code агента
+cd ~/my-project && claude   # с .mcp.json или через claude mcp add
 ```
 
-Все три агента используют общий тред и реестр задач. Тимлид отправляет инструкции из веб-интерфейса и видит активность всех агентов в реальном времени.
+Все агенты используют общий тред и реестр задач. Тимлид отправляет инструкции из веб-интерфейса и видит активность всех агентов в реальном времени.
 
 ---
 
 ## Prompt Templates
 
-Готовые шаблоны системных промптов для агентов и тимлидов — в папке [`prompt_templates/`](prompt_templates/):
+Готовые шаблоны системных промптов — в папке [`prompt_templates/`](prompt_templates/):
 
 | Файл | Назначение |
 |---|---|
 | [`claude-agent.md`](prompt_templates/claude-agent.md) | Вставить в `CLAUDE.md` проекта |
-| [`codex-agent.md`](prompt_templates/codex-agent.md) | Вставить в `AGENTS.md` проекта |
+| [`codex-agent.md`](prompt_templates/codex-agent.md) | Генерируется в `AGENTS.md` через `init-worker.sh` |
 | [`team-lead.md`](prompt_templates/team-lead.md) | Инструкции тимлида для AgentBoard UI |
 
-Все шаблоны содержат ключевое правило: **каждая единица работы должна иметь задачу**:
+Все шаблоны кодируют полный протокол агента:
 
-```
-Задача есть (pending) → task_claim() → работать
-Задачи нет            → task_create() → task_claim() → работать
-Без задачи            → код не пишется. Без исключений.
-```
+- **Нет задачи = нет работы** — каждая единица работы требует задачи; создайте, если её нет
+- **Сначала спроси** — уточняй неоднозначные инструкции через тред перед началом работы
+- **Максимум 3 файла на задачу** — разбивай на подзадачи, чтобы агенты работали параллельно
+- **Обязательный state report** — постинг структурированного отчёта при завершении задачи
+- **PERSONALITY + MEMORY** — читай оба файла при каждом старте сессии
 
 ---
 
@@ -406,7 +408,6 @@ WebSocket
   События от сервера:
   { "type": "message",      "data": { ...Message } }
   { "type": "task_update",  "data": { ...Task } }
-  { "type": "task_new",     "data": { ...Task } }
   { "type": "agent_status", "data": { "agent_id": "...", "online": true } }
   { "type": "file_lock",    "data": { "path": "...", "locked": true, "agent_id": "..." } }
 ```
@@ -453,14 +454,29 @@ agentboard/
 │   ├── Dockerfile
 │   ├── nginx.conf
 │   └── .env.example
+├── tools/
+│   └── codex-worker/
+│       ├── worker.py        демон цикла задач + MCP auth-прокси
+│       └── requirements.txt
 ├── prompt_templates/
 │   ├── claude-agent.md      шаблон для CLAUDE.md
-│   ├── codex-agent.md       шаблон для AGENTS.md
-│   ├── team-lead.md         шаблон инструкций тимлида
-│   └── README.md
+│   ├── codex-agent.md       генерируется в AGENTS.md через init-worker.sh
+│   └── team-lead.md         шаблон инструкций тимлида
+├── up.sh                    запуск бэкенда (+ опциональный фронтенд)
+├── down.sh                  остановка бэкенда, фронтенда, всех воркеров
+├── init-worker.sh           инициализация codex-агента в любой директории
 ├── docker-compose.yml
 ├── .env.example
 └── README.md
+```
+
+Рабочие директории агентов, созданные `init-worker.sh`:
+```
+~/my-project/
+├── AGENTS.md       Системный промпт агента (генерируется из шаблона)
+├── PERSONALITY     Идентичность агента, стиль, жёсткие ограничения (при первом запуске)
+├── MEMORY          Append-only межсессионные заметки (контролирует агент)
+└── worker.log      Stdout/stderr воркера
 ```
 
 ---
@@ -470,24 +486,31 @@ agentboard/
 ```
 agent_ping  ←──────────────────── каждые 60 с ──────────────────────┐
                                                                       │
-[connect] → agent_ping → instruction_get → task_list                  │
-                                              ↓                       │
-                                    task_create (если нужно)          │
-                                              ↓                       │
-                                         task_claim                   │
-                                              ↓                       │
-                                       thread_post(claim)             │
-                                              ↓                       │
-                                        file_lock(path)               │
-                                              ↓                       │
-                                         [правка файлов]              │
-                                              ↓                       │
-                               thread_post(update) каждые 10 мин  ───┘
-                               task_update(in_progress, progress=N)
-                                              ↓
-                             task_update(done) + thread_post(done)
-                                              ↓
-                                        file_unlock(path)
+[connect] → agent_ping                                                │
+               ↓                                                      │
+          read PERSONALITY ← роль, стиль, жёсткие ограничения        │
+               ↓                                                      │
+          read MEMORY      ← межсессионные факты о кодовой базе      │
+               ↓                                                      │
+          thread_read()    ← догнать, ответить на @упоминания         │
+               ↓                                                      │
+          instruction_get() + task_list()                             │
+               ↓                                                      │
+          [неоднозначно?] → thread_post(question) → ждать ответа     │
+               ↓                                                      │
+          task_claim  (или task_create → task_claim)                  │
+               ↓                                                      │
+          thread_post(claim)                                          │
+               ↓                                                      │
+          file_lock(path)                                             │
+               ↓                                                      │
+          [правка ≤3 файлов]                                          │
+               ↓                                                      │
+     thread_post(update) каждые 10 мин  ───────────────────────────────┘
+               ↓
+     task_update(done) + thread_post(done: state report)
+               ↓
+     file_unlock(path) → обратно к thread_read()
 ```
 
 Детектирование offline:
