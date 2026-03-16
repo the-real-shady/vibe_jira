@@ -379,93 +379,125 @@ def build_mention_prompt(msg: dict, instructions: list[dict],
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Codex project config writer
+# MCP header-injection proxy
+# Sits between codex and AgentBoard; codex connects with no auth,
+# proxy adds X-API-Key + X-Agent-Id before forwarding to the real backend.
 # ──────────────────────────────────────────────────────────────────────────────
 
-def setup_codex_mcp(codex_bin: str, host: str, project: str,
-                    api_key: str, agent_id: str) -> None:
-    """
-    Register the AgentBoard MCP server via `codex mcp add` (writes to
-    ~/.codex/config.toml) then patch in the custom headers that the CLI
-    command doesn't support.
+import http.server
+import socketserver
+import urllib.request
+import urllib.error
 
-    Idempotent — safe to call on every startup.
-    """
-    mcp_url = f"{host.rstrip('/')}/mcp/projects/{project}/messages"
 
-    # 1. Register URL (codex mcp add doesn't support --header, so headers
-    #    are patched in step 2)
+class _ProxyHandler(http.server.BaseHTTPRequestHandler):
+    # Set by start_mcp_proxy()
+    target_url: str = ""
+    inject_headers: dict = {}
+
+    def log_message(self, fmt, *args):  # silence default access log
+        pass
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body   = self.rfile.read(length) if length else b""
+
+        req = urllib.request.Request(self.target_url, data=body, method="POST")
+        # Forward safe headers from the client
+        for key in ("Content-Type", "Accept"):
+            if key in self.headers:
+                req.add_header(key, self.headers[key])
+        # Always inject auth headers (override whatever codex sent)
+        for k, v in self.inject_headers.items():
+            req.add_header(k, v)
+
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                resp_body = resp.read()
+                self.send_response(resp.status)
+                ct = resp.headers.get("Content-Type", "application/json")
+                self.send_header("Content-Type", ct)
+                self.send_header("Content-Length", str(len(resp_body)))
+                self.end_headers()
+                self.wfile.write(resp_body)
+        except urllib.error.HTTPError as exc:
+            body_err = exc.read()
+            self.send_response(exc.code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body_err)))
+            self.end_headers()
+            self.wfile.write(body_err)
+        except Exception as exc:
+            msg = str(exc).encode()
+            self.send_response(502)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(msg)))
+            self.end_headers()
+            self.wfile.write(msg)
+
+
+def start_mcp_proxy(target_url: str, api_key: str, agent_id: str) -> int:
+    """
+    Start a background HTTP proxy on a random free port.
+    Returns the port number — use this as the MCP URL for codex.
+    """
+    # Find a free port
+    import socket as _socket
+    with _socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+
+    handler = type("Handler", (_ProxyHandler,), {
+        "target_url":     target_url,
+        "inject_headers": {"X-API-Key": api_key, "X-Agent-Id": agent_id},
+    })
+
+    server = socketserver.ThreadingTCPServer(("127.0.0.1", port), handler)
+    server.daemon_threads = True
+
+    t = threading.Thread(target=server.serve_forever, daemon=True, name="mcp-proxy")
+    t.start()
+    log.info("MCP proxy started → http://127.0.0.1:%d  (forwarding to %s)", port, target_url)
+    return port
+
+
+def setup_codex_mcp(codex_bin: str, proxy_url: str) -> None:
+    """Register the proxy URL via `codex mcp add`. Idempotent."""
     result = subprocess.run(
-        [codex_bin, "mcp", "add", "agentboard", "--url", mcp_url],
+        [codex_bin, "mcp", "add", "agentboard", "--url", proxy_url],
         capture_output=True, text=True,
     )
     if result.returncode == 0:
-        log.info("codex mcp add agentboard → registered ✓")
+        log.info("codex mcp add agentboard → %s ✓", proxy_url)
     else:
-        # May already exist — that's fine; log and continue
-        log.debug("codex mcp add: %s", (result.stdout + result.stderr).strip()[:200])
-
-    # 2. Patch ~/.codex/config.toml to inject http_headers.
-    #    Use inline-table form which codex's TOML parser handles reliably.
-    user_config = os.path.expanduser("~/.codex/config.toml")
-    try:
-        raw = open(user_config, encoding="utf-8").read() if os.path.exists(user_config) else ""
-        # Remove any previously injected headers block for agentboard
-        import re
-        # Strip old http_headers line under [mcp_servers.agentboard]
-        raw = re.sub(
-            r'(\[mcp_servers\.agentboard\][^\[]*?)http_headers\s*=\s*\{[^\n]*\}\n',
-            r'\1',
-            raw, flags=re.DOTALL,
-        )
-        # Now inject fresh http_headers right after the url = "..." line
-        headers_line = (
-            f'http_headers = '
-            f'{{\"X-API-Key\" = \"{api_key}\", \"X-Agent-Id\" = \"{agent_id}\"}}\n'
-        )
-        raw = re.sub(
-            r'(\[mcp_servers\.agentboard\][^\[]*?url\s*=\s*"[^"]*"\n)',
-            r'\1' + headers_line,
-            raw, flags=re.DOTALL,
-        )
-        with open(user_config, "w", encoding="utf-8") as f:
-            f.write(raw)
-        log.info("Patched headers in %s ✓", user_config)
-    except Exception as exc:
-        log.warning("Could not patch %s: %s", user_config, exc)
+        log.debug("codex mcp add (already exists?): %s",
+                  (result.stdout + result.stderr).strip()[:200])
 
 
-def setup_codex_config(work_dir: str, host: str, project: str,
-                       api_key: str, agent_id: str) -> str:
+def setup_codex_config(work_dir: str, proxy_url: str) -> str:
     """
-    Write .codex/config.toml inside work_dir (project-level override).
-    Uses inline-table for http_headers — the only form codex reliably parses.
+    Write .codex/config.toml inside work_dir pointing codex at the local
+    MCP proxy (no auth headers needed — the proxy injects them).
     Also enables network_access so the MCP client can reach localhost.
-
-    Returns the path to the written file.
     """
     config_dir  = os.path.join(work_dir, ".codex")
     config_path = os.path.join(config_dir, "config.toml")
     os.makedirs(config_dir, exist_ok=True)
 
-    mcp_url = f"{host.rstrip('/')}/mcp/projects/{project}/messages"
-
-    # Use inline-table (not subtable) for http_headers — codex parses this correctly
     config_content = (
         "# Generated by codex-worker — do not edit by hand\n\n"
         'approval_policy = "never"\n\n'
-        "# Enable network access so MCP client can reach localhost\n"
+        "# Enable network access so MCP client can reach the local proxy\n"
         "[sandbox_workspace_write]\n"
         "network_access = true\n\n"
         "[mcp_servers.agentboard]\n"
-        f'url = "{mcp_url}"\n'
-        f'http_headers = {{\"X-API-Key\" = \"{api_key}\", \"X-Agent-Id\" = \"{agent_id}\"}}\n'
+        f'url = "{proxy_url}"\n'
     )
 
     with open(config_path, "w", encoding="utf-8") as f:
         f.write(config_content)
 
-    log.info("Wrote project codex config → %s", config_path)
+    log.info("Wrote project codex config → %s  (proxy: %s)", config_path, proxy_url)
     return config_path
 
 
@@ -635,12 +667,16 @@ def main():
 
     ab = AgentBoard(args.host, args.project, args.api_key, args.agent_id)
 
-    # Register MCP server via `codex mcp add` (writes ~/.codex/config.toml)
-    # and patch in custom headers that the CLI doesn't expose
-    setup_codex_mcp(args.codex_bin, args.host, args.project, args.api_key, args.agent_id)
+    # Start local MCP proxy — intercepts codex requests and injects auth headers
+    real_mcp_url = f"{args.host.rstrip('/')}/mcp/projects/{args.project}/messages"
+    proxy_port   = start_mcp_proxy(real_mcp_url, args.api_key, args.agent_id)
+    proxy_url    = f"http://127.0.0.1:{proxy_port}"
 
-    # Write project-level .codex/config.toml with network_access + MCP inline headers
-    setup_codex_config(work_dir, args.host, args.project, args.api_key, args.agent_id)
+    # Register proxy URL via `codex mcp add` (no auth needed — proxy handles it)
+    setup_codex_mcp(args.codex_bin, proxy_url)
+
+    # Write project-level .codex/config.toml pointing codex at the proxy
+    setup_codex_config(work_dir, proxy_url)
 
     # Register
     pong = ab.ping(args.capabilities)
