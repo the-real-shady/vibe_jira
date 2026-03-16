@@ -152,7 +152,7 @@ export default function ProjectPage() {
         <Thread messages={displayedMessages} onFilterAgent={setAgentFilter} />
 
         {/* Instruction input */}
-        <InstructionInput onSend={handleSend} />
+        <InstructionInput onSend={handleSend} agents={agents} />
       </div>
 
       {/* Right panel: Task Registry */}
