@@ -437,6 +437,22 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         body   = self.rfile.read(length) if length else b""
 
+        # Intercept MCP lifecycle notifications that the backend doesn't handle.
+        # notifications/initialized is required by the rmcp client after initialize,
+        # but AgentBoard has no handler for it → short-circuit with 200 {}.
+        try:
+            rpc_method = json.loads(body).get("method", "")
+        except (json.JSONDecodeError, AttributeError):
+            rpc_method = ""
+        if rpc_method == "notifications/initialized":
+            resp = b"{}"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(resp)))
+            self.end_headers()
+            self.wfile.write(resp)
+            return
+
         req = urllib.request.Request(self.target_url, data=body, method="POST")
         # Forward safe headers from the client
         for key in ("Content-Type", "Accept"):
