@@ -393,10 +393,45 @@ import urllib.error
 class _ProxyHandler(http.server.BaseHTTPRequestHandler):
     # Set by start_mcp_proxy()
     target_url: str = ""
+    sse_url:    str = ""
     inject_headers: dict = {}
 
     def log_message(self, fmt, *args):  # silence default access log
         pass
+
+    def _send_error(self, code: int, msg: str) -> None:
+        body = msg.encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        """Forward SSE stream requests (MCP HTTP+SSE transport)."""
+        url = self.sse_url or self.target_url
+        req = urllib.request.Request(url, method="GET")
+        for key in ("Accept", "Last-Event-ID"):
+            if key in self.headers:
+                req.add_header(key, self.headers[key])
+        for k, v in self.inject_headers.items():
+            req.add_header(k, v)
+        try:
+            resp = urllib.request.urlopen(req, timeout=None)
+            self.send_response(resp.status)
+            ct = resp.headers.get("Content-Type", "text/event-stream")
+            self.send_header("Content-Type", ct)
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+            while True:
+                chunk = resp.read(256)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                self.wfile.flush()
+        except Exception as exc:
+            self._send_error(502, str(exc))
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
@@ -428,30 +463,33 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body_err)
         except Exception as exc:
-            msg = str(exc).encode()
-            self.send_response(502)
-            self.send_header("Content-Type", "text/plain")
-            self.send_header("Content-Length", str(len(msg)))
-            self.end_headers()
-            self.wfile.write(msg)
+            self._send_error(502, str(exc))
 
 
-def start_mcp_proxy(target_url: str, api_key: str, agent_id: str) -> int:
+def start_mcp_proxy(target_url: str, api_key: str, agent_id: str,
+                    port: int = 0) -> int:
     """
-    Start a background HTTP proxy on a random free port.
+    Start a background HTTP proxy.
+    If port=0 a free port is chosen automatically.
     Returns the port number — use this as the MCP URL for codex.
     """
-    # Find a free port
     import socket as _socket
-    with _socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
+
+    if port == 0:
+        with _socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+
+    # Derive the SSE endpoint from the messages URL
+    sse_url = target_url.rsplit("/messages", 1)[0] + "/sse"
 
     handler = type("Handler", (_ProxyHandler,), {
         "target_url":     target_url,
+        "sse_url":        sse_url,
         "inject_headers": {"X-API-Key": api_key, "X-Agent-Id": agent_id},
     })
 
+    socketserver.TCPServer.allow_reuse_address = True
     server = socketserver.ThreadingTCPServer(("127.0.0.1", port), handler)
     server.daemon_threads = True
 
@@ -461,17 +499,41 @@ def start_mcp_proxy(target_url: str, api_key: str, agent_id: str) -> int:
     return port
 
 
-def setup_codex_mcp(codex_bin: str, proxy_url: str) -> None:
-    """Register the proxy URL via `codex mcp add`. Idempotent."""
-    result = subprocess.run(
-        [codex_bin, "mcp", "add", "agentboard", "--url", proxy_url],
-        capture_output=True, text=True,
-    )
-    if result.returncode == 0:
-        log.info("codex mcp add agentboard → %s ✓", proxy_url)
-    else:
-        log.debug("codex mcp add (already exists?): %s",
-                  (result.stdout + result.stderr).strip()[:200])
+def setup_codex_mcp(proxy_url: str) -> None:
+    """
+    Write the agentboard MCP server entry directly into ~/.codex/config.toml.
+    Also ensures network_access = true for the workspace-write sandbox.
+    More reliable than `codex mcp add` which silently no-ops if entry exists.
+    """
+    import re
+
+    config_path = os.path.expanduser("~/.codex/config.toml")
+    os.makedirs(os.path.dirname(config_path), exist_ok=True)
+
+    content = ""
+    if os.path.exists(config_path):
+        with open(config_path, encoding="utf-8") as f:
+            content = f.read()
+
+    # Remove stale [mcp_servers.agentboard] section (any previous port)
+    content = re.sub(
+        r"\[mcp_servers\.agentboard\][^\[]*",
+        "",
+        content,
+        flags=re.DOTALL,
+    ).rstrip() + "\n"
+
+    # Append fresh section
+    content += f'\n[mcp_servers.agentboard]\nurl = "{proxy_url}"\n'
+
+    # Ensure network access so codex can reach the local proxy
+    if "network_access" not in content:
+        content += "\n[sandbox_workspace_write]\nnetwork_access = true\n"
+
+    with open(config_path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+    log.info("Updated ~/.codex/config.toml → agentboard: %s", proxy_url)
 
 
 def setup_codex_config(work_dir: str, proxy_url: str) -> str:
@@ -651,6 +713,9 @@ def main():
     ap.add_argument("--capabilities", nargs="*", default=["code", "bash"])
     ap.add_argument("--prompt-template", help="Custom prompt template file")
     ap.add_argument("--codex-args", nargs=argparse.REMAINDER, default=[])
+    ap.add_argument("--proxy-port",  type=int, default=0,
+                    help="Fixed port for the local MCP proxy (default: random). "
+                         "Use a fixed port to survive worker restarts without re-adding MCP config.")
     ap.add_argument("--exit-when-empty", action="store_true")
     ap.add_argument("--verbose", "-v", action="store_true")
     args = ap.parse_args()
@@ -669,11 +734,12 @@ def main():
 
     # Start local MCP proxy — intercepts codex requests and injects auth headers
     real_mcp_url = f"{args.host.rstrip('/')}/mcp/projects/{args.project}/messages"
-    proxy_port   = start_mcp_proxy(real_mcp_url, args.api_key, args.agent_id)
+    proxy_port   = start_mcp_proxy(real_mcp_url, args.api_key, args.agent_id,
+                                   port=args.proxy_port)
     proxy_url    = f"http://127.0.0.1:{proxy_port}"
 
-    # Register proxy URL via `codex mcp add` (no auth needed — proxy handles it)
-    setup_codex_mcp(args.codex_bin, proxy_url)
+    # Write proxy URL into ~/.codex/config.toml (idempotent, survives restarts)
+    setup_codex_mcp(proxy_url)
 
     # Write project-level .codex/config.toml pointing codex at the proxy
     setup_codex_config(work_dir, proxy_url)

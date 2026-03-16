@@ -286,6 +286,7 @@ python tools/codex-worker/worker.py --agent-id codex-worker-1 --work-dir ~/my-pr
 | `--poll` | `30` | Seconds to wait between polls when queue is empty |
 | `--exit-when-empty` | off | Exit instead of waiting when no pending tasks |
 | `--prompt-template` | built-in | Path to custom `.txt` prompt template with `{task_id}`, `{task_title}`, `{task_description}`, `{instructions}` placeholders |
+| `--proxy-port` | `0` (random) | Fixed port for the local MCP proxy. Set a stable port so the MCP config survives worker restarts |
 | `--codex-args` | — | Extra args forwarded verbatim to `codex exec` |
 
 The worker automatically: pings AgentBoard every loop (keep-alive), reads team-lead instructions and injects them into the task prompt, posts `claim` / `done` / `blocked` messages to the thread, and broadcasts `task_update` events to the UI in real time.
