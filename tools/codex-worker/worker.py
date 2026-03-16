@@ -430,27 +430,29 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
                     break
                 self.wfile.write(chunk)
                 self.wfile.flush()
+        except BrokenPipeError:
+            pass  # client disconnected mid-stream — normal when MCP session ends
         except Exception as exc:
-            self._send_error(502, str(exc))
+            try:
+                self._send_error(502, str(exc))
+            except BrokenPipeError:
+                pass
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         body   = self.rfile.read(length) if length else b""
 
         # Intercept MCP lifecycle notifications that the backend doesn't handle.
-        # notifications/initialized is required by the rmcp client after initialize,
-        # but AgentBoard has no handler for it → short-circuit with 200 {}.
+        # JSON-RPC notifications have no "id", so they expect NO response body.
+        # rmcp requires 202 Accepted + empty body; returning {} causes a decode error.
         try:
             rpc_method = json.loads(body).get("method", "")
         except (json.JSONDecodeError, AttributeError):
             rpc_method = ""
-        if rpc_method == "notifications/initialized":
-            resp = b"{}"
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(resp)))
+        if rpc_method and rpc_method.startswith("notifications/"):
+            self.send_response(202)
+            self.send_header("Content-Length", "0")
             self.end_headers()
-            self.wfile.write(resp)
             return
 
         req = urllib.request.Request(self.target_url, data=body, method="POST")
