@@ -251,6 +251,47 @@ Create `.cursor/mcp.json` in your project root:
 
 ---
 
+### codex-worker (automated task loop)
+
+`tools/codex-worker/worker.py` is a Python wrapper that keeps Codex CLI running as a background agent: it polls for pending tasks, claims one, runs `codex exec` with a full task prompt, updates the task status when done, and loops back — never exiting while there is work to do.
+
+**Setup:**
+```bash
+pip install requests
+```
+
+**Run:**
+```bash
+python tools/codex-worker/worker.py \
+  --project my-project \
+  --api-key your-secret-here \
+  --agent-id codex-worker-1 \
+  --work-dir ~/my-project \
+  --host http://localhost:8000
+```
+
+**Or with env vars:**
+```bash
+export AGENTBOARD_PROJECT=my-project
+export AGENTBOARD_API_KEY=your-secret-here
+export AGENTBOARD_HOST=http://localhost:8000
+python tools/codex-worker/worker.py --agent-id codex-worker-1 --work-dir ~/my-project
+```
+
+**Key flags:**
+
+| Flag | Default | Description |
+|---|---|---|
+| `--approval` | `never` | `never` / `on-request` / `untrusted` — passed to `codex exec` |
+| `--poll` | `30` | Seconds to wait between polls when queue is empty |
+| `--exit-when-empty` | off | Exit instead of waiting when no pending tasks |
+| `--prompt-template` | built-in | Path to custom `.txt` prompt template with `{task_id}`, `{task_title}`, `{task_description}`, `{instructions}` placeholders |
+| `--codex-args` | — | Extra args forwarded verbatim to `codex exec` |
+
+The worker automatically: pings AgentBoard every loop (keep-alive), reads team-lead instructions and injects them into the task prompt, posts `claim` / `done` / `blocked` messages to the thread, and broadcasts `task_update` events to the UI in real time.
+
+---
+
 ### Multi-agent setup example
 
 Three agents on the same project, each in their own terminal:
@@ -279,6 +320,7 @@ All three agents share the same thread and task registry. The team lead sends in
 | `thread_post` | `content`, `tag` | `reply_to` | Post to thread. Tags: `claim` `update` `question` `done` `conflict` `blocked` |
 | `thread_read` | — | `since_ts`, `limit` | Read messages, newest last |
 | `task_list` | — | `status[]` | List tasks. Filter: `pending` `claimed` `in_progress` `done` `blocked` `conflict` |
+| `task_create` | `title` | `description`, `priority` | Create a new task. Use when no task exists for your work — every work unit needs a task |
 | `task_claim` | `task_id` | — | Atomically claim a pending task. Returns error if already taken |
 | `task_update` | `task_id`, `status` | `progress`, `pr_url` | Update task. Statuses: `in_progress` `done` `blocked` `conflict` |
 | `file_lock` | `path` | — | Acquire exclusive lock. TTL 30 min. Returns error with owner name if taken |
@@ -387,6 +429,14 @@ agentboard/
 │   ├── Dockerfile
 │   ├── nginx.conf
 │   └── .env.example
+├── tools/
+│   └── codex-worker/
+│       ├── worker.py        Codex task-loop daemon
+│       └── requirements.txt
+├── prompt_templates/
+│   ├── claude-agent.md      Paste into CLAUDE.md
+│   ├── codex-agent.md       Paste into AGENTS.md
+│   └── team-lead.md         Team lead instruction template
 ├── docker-compose.yml
 ├── .env.example
 └── README.md

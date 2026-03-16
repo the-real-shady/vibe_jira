@@ -253,6 +253,47 @@ mcpServers:
 
 ---
 
+### codex-worker (автоматический цикл задач)
+
+`tools/codex-worker/worker.py` — Python-обёртка, которая запускает Codex CLI как фоновый агент: опрашивает очередь задач, захватывает одну, запускает `codex exec` с полным промптом задачи, обновляет статус по завершении и повторяет цикл — не завершает работу, пока есть задачи.
+
+**Установка:**
+```bash
+pip install requests
+```
+
+**Запуск:**
+```bash
+python tools/codex-worker/worker.py \
+  --project my-project \
+  --api-key ваш-секрет \
+  --agent-id codex-worker-1 \
+  --work-dir ~/my-project \
+  --host http://localhost:8000
+```
+
+**Через переменные окружения:**
+```bash
+export AGENTBOARD_PROJECT=my-project
+export AGENTBOARD_API_KEY=ваш-секрет
+export AGENTBOARD_HOST=http://localhost:8000
+python tools/codex-worker/worker.py --agent-id codex-worker-1 --work-dir ~/my-project
+```
+
+**Ключевые флаги:**
+
+| Флаг | По умолчанию | Описание |
+|---|---|---|
+| `--approval` | `never` | `never` / `on-request` / `untrusted` — передаётся в `codex exec` |
+| `--poll` | `30` | Секунд ожидания между проверками, если очередь пустая |
+| `--exit-when-empty` | выкл | Завершить процесс вместо ожидания, когда нет задач |
+| `--prompt-template` | встроенный | Путь к кастомному шаблону промпта (плейсхолдеры: `{task_id}`, `{task_title}`, `{task_description}`, `{instructions}`) |
+| `--codex-args` | — | Дополнительные аргументы, передаваемые напрямую в `codex exec` |
+
+Воркер автоматически: пингует AgentBoard каждый цикл (keep-alive), читает инструкции тимлида и встраивает их в промпт задачи, постит `claim` / `done` / `blocked` в тред, транслирует `task_update` события в UI в реальном времени.
+
+---
+
 ### Пример мультиагентной команды
 
 Три агента на одном проекте, каждый в своём терминале:
