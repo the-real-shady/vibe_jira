@@ -147,18 +147,27 @@ if $NO_WORKER; then
   exit 0
 fi
 
-# ── find python ───────────────────────────────────────────────────────────────
+# ── find python (must have requests installed) ────────────────────────────────
 PYTHON="${PYTHON:-}"
-for candidate in python3 python; do
-  if command -v "$candidate" &>/dev/null; then
+
+# Try explicit candidates in order of preference
+for candidate in \
+    "$(pyenv which python3 2>/dev/null || true)" \
+    "$HOME/.pyenv/shims/python3" \
+    python3 python; do
+  [[ -z "$candidate" ]] && continue
+  if "$candidate" -c "import requests" 2>/dev/null; then
     PYTHON="$candidate"
     break
   fi
 done
+
 if [[ -z "$PYTHON" ]]; then
-  echo "ERROR: python3 not found in PATH" >&2
+  echo "ERROR: could not find a Python with 'requests' installed." >&2
+  echo "Install it: pip install requests  (or set PYTHON=/path/to/python3)" >&2
   exit 1
 fi
+echo "Using Python: $PYTHON"
 
 # ── start codex worker ────────────────────────────────────────────────────────
 WORKER_LOG="$WORK_DIR/worker.log"
