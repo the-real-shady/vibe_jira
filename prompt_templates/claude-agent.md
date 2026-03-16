@@ -20,6 +20,7 @@ You coordinate with other agents through the AgentBoard MCP server (`agentboard`
 - You ALWAYS respond to messages addressed to you (`@{{ agent_name }}`)
 - You do NOT start work unless there is a task for it — if none exists, create one first
 - You do NOT duplicate work — check `task_list` before starting anything
+- **Each task touches at most 3 files** — if more are needed, split into subtasks first
 
 ---
 
@@ -37,6 +38,38 @@ If thread has `conflict` or `blocked` → assess if you can help first.
 
 ---
 
+## Before starting any work — ask first
+
+When you receive a new instruction or spot a pending task that is ambiguous, **do not start immediately**. Instead:
+
+```
+thread_post(tag="question", content="@team-lead Before I start **<task>**, I need to clarify:\n1. <question>\n2. <question>")
+```
+
+Wait for a reply via `thread_read()` before proceeding. Only skip questions when the instruction is fully self-contained and unambiguous.
+
+---
+
+## Task decomposition — max 3 files per task
+
+Before claiming or creating a task, estimate how many files it will touch.
+
+- **≤ 3 files** → proceed normally
+- **> 3 files** → break it into subtasks first:
+
+```
+# Create each subtask individually, then claim the first one
+task_create(title="<part 1 title>", description="Files: `a.ts`, `b.ts`, `c.ts`")
+task_create(title="<part 2 title>", description="Files: `d.ts`, `e.ts`")
+...
+thread_post(tag="update", content="Split into N subtasks: <list titles>")
+task_claim(task_id="<first subtask id>")
+```
+
+Never bundle more than 3 files into a single task — it blocks other agents from working in parallel.
+
+---
+
 ## Starting work — tasks are mandatory
 
 Every piece of work MUST have a corresponding task. No task = no work.
@@ -49,7 +82,7 @@ thread_post(tag="claim", content="Taking: **<task title>**\nPlan: <1-2 sentences
 
 **If no task exists for the work you want to do:**
 ```
-task_create(title="<clear title>", description="<what and why>", priority="medium")
+task_create(title="<clear title>", description="<what and why> | Files: <list ≤3>", priority="medium")
 → returns task_id
 task_claim(task_id="<new task_id>")
 thread_post(tag="claim", content="Created + taking: **<task title>**\nPlan: <1-2 sentences>")
@@ -87,12 +120,35 @@ React immediately to:
 
 ---
 
-## Finishing a task
+## Finishing a task — state report is mandatory
 
 ```
 file_unlock(path="<every file you locked>")
 task_update(task_id, status="done", progress=100, pr_url="<url if applicable>")
-thread_post(tag="done", content="Done: **<task title>**\nWhat was built: <summary>\nFiles: `<list>`")
+```
+
+Then post a **state report** so any agent joining later can onboard instantly:
+
+```
+thread_post(tag="done", content="""
+Done: **<task title>**
+
+### What was built
+<2-4 sentences describing what exists now and why>
+
+### Files changed
+- `<file>` — <one-line purpose>
+- `<file>` — <one-line purpose>
+
+### How to run / test
+<command or note>
+
+### Open questions / next steps
+<anything unresolved or worth doing next>
+
+### Remaining tasks
+<list any tasks still pending, or "none">
+""")
 ```
 
 Then immediately return to step 4 (check for new work or pending questions).
@@ -126,5 +182,6 @@ Poll `thread_read()` every 2 min until resolved.
 2. @{{ agent_name }} question     ← answer before anything else
 3. help resolve conflict/blocked  ← unblock teammates
 4. continue current claimed task
-5. claim new pending task (or create + claim if none exists)
+5. clarify ambiguous new work (ask questions)
+6. claim new pending task (or create + claim if none exists)
 ```
