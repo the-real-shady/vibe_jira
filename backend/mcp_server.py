@@ -53,19 +53,19 @@ def _get_or_create_agent(
     agent_id: Optional[str],
     agent_name: Optional[str] = None,
 ) -> str:
-    """Return a stable agent_id, creating an agent record if needed."""
+    """Return a stable agent_key (= X-Agent-Id), creating an Agent row if needed."""
     if not agent_id:
         agent_id = str(uuid4())
 
     agent = session.exec(
-        select(Agent).where(Agent.id == agent_id, Agent.project_id == project_id)
+        select(Agent).where(Agent.agent_key == agent_id, Agent.project_id == project_id)
     ).first()
 
     if not agent:
         agent = Agent(
-            id=agent_id,
             project_id=project_id,
-            name=agent_name or agent_id[:8],
+            agent_key=agent_id,
+            name=agent_name or agent_id,
             online=True,
             last_ping=datetime.utcnow(),
         )
@@ -475,7 +475,7 @@ async def _handle_agent_ping(
         return {"error": "agent_name is required"}
 
     agent = session.exec(
-        select(Agent).where(Agent.id == agent_id, Agent.project_id == project.id)
+        select(Agent).where(Agent.agent_key == agent_id, Agent.project_id == project.id)
     ).first()
 
     if agent:
@@ -486,8 +486,8 @@ async def _handle_agent_ping(
             agent.capabilities = json.dumps(capabilities)
     else:
         agent = Agent(
-            id=agent_id,
             project_id=project.id,
+            agent_key=agent_id,
             name=agent_name,
             capabilities=json.dumps(capabilities) if capabilities else None,
             online=True,

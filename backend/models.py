@@ -39,6 +39,7 @@ class Task(SQLModel, table=True):
 class Agent(SQLModel, table=True):
     id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
     project_id: str = Field(foreign_key="project.id", index=True)
+    agent_key: str = Field(index=True)   # X-Agent-Id value; unique per project
     name: str
     capabilities: Optional[str] = None  # JSON array
     last_ping: Optional[datetime] = None

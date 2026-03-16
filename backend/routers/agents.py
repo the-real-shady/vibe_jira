@@ -15,6 +15,7 @@ router = APIRouter(prefix="/api/v1/projects/{slug}/agents", tags=["agents"])
 
 class AgentOut(BaseModel):
     id: str
+    agent_key: str
     project_id: str
     name: str
     capabilities: Optional[str]
